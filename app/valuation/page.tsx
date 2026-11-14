@@ -20,7 +20,8 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth-context';
 import { calculateDemoValuation } from '@/lib/valuation-engine';
 
-import type { Property, ComparableSale, ValuationResult } from '@/lib/types';
+import type { Property, ComparableSale } from '@/lib/types';
+import type { ValuationResult } from '@/lib/valuation-engine';
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat('en-IN', {
