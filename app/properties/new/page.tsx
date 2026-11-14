@@ -185,7 +185,7 @@ export default function RegisterPropertyPage() {
                 Property Location
               </CardTitle>
               <CardDescription>
-                Enter the property's address and geographical details.
+                Enter the property&apos;s address and geographical details.
               </CardDescription>
             </CardHeader>
 
