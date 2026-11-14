@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import type { Profile, UserRole } from './types';
@@ -45,55 +46,122 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .maybeSingle();
 
     if (error) {
-      console.error('Error fetching profile:', error);
-      return null;
+      console.error('Profile fetch error:', error);
+      throw error;
     }
+
     return data as Profile | null;
   }
 
+  async function ensureProfile(authUser: User): Promise<Profile> {
+    let existing = await fetchProfile(authUser.id);
+
+    if (existing) return existing;
+
+    const email = authUser.email || '';
+
+    const fullName =
+      authUser.user_metadata?.full_name ||
+      authUser.user_metadata?.name ||
+      email.split('@')[0];
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .insert({
+        id: authUser.id,
+        email,
+        full_name: fullName,
+        role: 'valuer',
+        organization: null,
+      })
+      .select('*')
+      .single();
+
+    if (error) {
+      console.error('Profile creation error:', error);
+      throw error;
+    }
+
+    return data as Profile;
+  }
+
   async function refreshProfile() {
-    if (user) {
-      const p = await fetchProfile(user.id);
-      setProfile(p);
+    if (!user) return;
+
+    try {
+      const result = await ensureProfile(user);
+      setProfile(result);
+    } catch (error) {
+      console.error('Profile refresh error:', error);
     }
   }
 
   useEffect(() => {
     let mounted = true;
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!mounted) return;
-      setSession(session);
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchProfile(session.user.id).then((p) => {
-          if (mounted) {
-            setProfile(p);
-            setLoading(false);
-          }
-        });
-      } else {
-        setLoading(false);
+    async function initialize() {
+      try {
+        const { data, error } = await supabase.auth.getSession();
+
+        if (error) throw error;
+
+        const currentSession = data.session;
+
+        if (!mounted) return;
+
+        setSession(currentSession);
+        setUser(currentSession?.user ?? null);
+
+        if (currentSession?.user) {
+          const result = await ensureProfile(currentSession.user);
+
+          if (mounted) setProfile(result);
+        }
+      } catch (error) {
+        console.error('Authentication initialization error:', error);
+      } finally {
+        if (mounted) setLoading(false);
       }
-    });
+    }
+
+    initialize();
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        (async () => {
-          const p = await fetchProfile(session.user.id);
-          if (mounted) setProfile(p);
-          if (_event === 'SIGNED_IN') {
-            await logAudit(session.user.id, 'login', 'auth', session.user.id);
-          }
-        })();
-      } else {
+    } = supabase.auth.onAuthStateChange((event, currentSession) => {
+      setSession(currentSession);
+      setUser(currentSession?.user ?? null);
+
+      if (!currentSession?.user) {
         setProfile(null);
+        setLoading(false);
+        return;
       }
-      setLoading(false);
+
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        setLoading(true);
+
+        setTimeout(async () => {
+          try {
+            const result = await ensureProfile(currentSession.user);
+
+            if (mounted) setProfile(result);
+
+            if (event === 'SIGNED_IN') {
+              await logAudit(
+                currentSession.user.id,
+                'login',
+                'auth',
+                currentSession.user.id
+              );
+            }
+          } catch (error) {
+            console.error('Authentication profile error:', error);
+          } finally {
+            if (mounted) setLoading(false);
+          }
+        }, 0);
+      }
     });
 
     return () => {
@@ -103,15 +171,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   async function signIn(email: string, password: string) {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-    if (error) return { error: error.message };
-    if (data.user) {
-      await logAudit(data.user.id, 'login', 'auth', data.user.id);
+    try {
+      setLoading(true);
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) return { error: error.message };
+
+      if (!data.user) {
+        return { error: 'Unable to authenticate user.' };
+      }
+
+      setSession(data.session);
+      setUser(data.user);
+
+      const result = await ensureProfile(data.user);
+      setProfile(result);
+
+      return { error: null };
+    } catch (error) {
+      console.error('Sign-in error:', error);
+
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Unable to load your user profile.',
+      };
+    } finally {
+      setLoading(false);
     }
-    return { error: null };
   }
 
   async function signUp(
@@ -121,27 +213,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     role: UserRole,
     organization?: string
   ) {
-    const { data, error } = await supabase.auth.signUp({
+    const { error } = await supabase.auth.signUp({
       email,
       password,
+      options: {
+        data: {
+          full_name: fullName,
+          organization: organization || null,
+        },
+      },
     });
+
     if (error) return { error: error.message };
-    if (data.user) {
-      const { error: profileError } = await supabase.from('profiles').insert({
-        id: data.user.id,
-        email,
-        full_name: fullName,
-        role,
-        organization: organization || null,
-      });
-      if (profileError) {
-        console.error('Profile creation error:', profileError);
-      }
-      await logAudit(data.user.id, 'register', 'auth', data.user.id, {
-        role,
-        email,
-      });
-    }
+
     return { error: null };
   }
 
@@ -149,7 +233,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (user) {
       await logAudit(user.id, 'logout', 'auth', user.id);
     }
+
     await supabase.auth.signOut();
+
     setProfile(null);
     setUser(null);
     setSession(null);
@@ -175,6 +261,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
   const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+
+  if (!ctx) {
+    throw new Error('useAuth must be used within AuthProvider');
+  }
+
   return ctx;
 }
