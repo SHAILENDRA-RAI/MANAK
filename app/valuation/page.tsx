@@ -18,7 +18,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth-context';
-import { calculateDemoValuation } from '@/lib/valuation-engine';
+import {
+  calculateDemoValuation,
+  findComparables,
+} from '@/lib/valuation-engine';
 
 import type { Property, ComparableSale } from '@/lib/types';
 import type { ValuationResult } from '@/lib/valuation-engine';
